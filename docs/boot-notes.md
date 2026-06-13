@@ -150,3 +150,36 @@ points at the **HAL-supplied PhysRamTable / RAM-bank layout** — i.e. what
 The fix belongs in the QEMU machine's memory-map/EMIF modelling, not the kernel.
 (Register-dump probes have been added to the debug kernel at the CAM mapping
 site and the fill loop to read out the exact bank/size/phys values next.)
+
+## FIXED: the CAM blocker was missing OCMC_RAM2/RAM3 backing
+
+Register-dump probes in the debug kernel produced the full `PhysRamTable` the
+HAL hands the kernel (addr in page units, len = `lenflags>>12`):
+
+```
+0x80000000  32 MB    DDR (low)
+0x40314000  432 KB   OCMC_RAM1 leftover   (modelled)
+0x40400000   2 MB    OCMC_RAM2 + RAM3     (NOT modelled - bug)
+0x82000000 992 MB    DDR
+0xc0500000  ~1 GB    DDR (2nd GB)
+```
+
+The kernel allocates its early structures (page-table backing, HAL workspace,
+the CAM, stacks) from the lowest banks first. After the 32 MB low-DDR bank it
+walks into the OCMC banks - including `0x40400000` (OCMC_RAM2/RAM3), which this
+machine did **not** back with RAM. Page-table/CAM writes there were silently
+dropped, so the resulting L2PT entries were absent and the CAM fill faulted at
+`0xf9bffff0` (the long-standing blocker).
+
+Fix: model OCMC_RAM2+RAM3 as 2 MiB of RAM at `0x40400000` (`TITANIUM_OCMC23_*`).
+With it, the debug ROM boots **past** the CAM for the first time:
+
+```
+... HAL_CleanerSpace
+aborttrap_init
+IMB_Full done
+InitCMOSCache entry          <- new blocker (CMOS/RTC via I2C, not yet modelled)
+```
+
+The CAM/0xF9BFFFF0 blocker is resolved. Next blocker is `InitCMOSCache`
+(`Kernel/s/NewReset`) reading the RTC/NVRAM the HAL accesses over I2C.

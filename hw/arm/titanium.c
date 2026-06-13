@@ -43,6 +43,8 @@
 
 #define TITANIUM_OCMC_BASE   0x40300000     /* OCMC_RAM1, 512 KiB on-chip SRAM */
 #define TITANIUM_OCMC_SIZE   (512 * 1024)
+#define TITANIUM_OCMC23_BASE 0x40400000     /* OCMC_RAM2 + RAM3, 2 MiB on-chip SRAM */
+#define TITANIUM_OCMC23_SIZE (2 * 1024 * 1024)
 #define TITANIUM_QSPI_BASE   0x5C000000ULL  /* QSPI flash memory-mapped window  */
 
 /* AM5728 MPU GIC exposes 160 shared peripheral interrupts */
@@ -432,6 +434,15 @@ static void titanium_init(MachineState *machine)
     memory_region_init_ram(ocmc, NULL, "titanium.ocmc", TITANIUM_OCMC_SIZE,
                            &error_fatal);
     memory_region_add_subregion(sysmem, TITANIUM_OCMC_BASE, ocmc);
+
+    /* On-chip RAM (OCMC_RAM2 + RAM3) - the RISC OS HAL reports these as RAM
+     * banks (PhysRamTable), so the kernel allocates page tables / the CAM from
+     * them. They must be backed or those writes are dropped and the resulting
+     * L2PT entries are absent -> translation fault when the CAM is filled. */
+    MemoryRegion *ocmc23 = g_new(MemoryRegion, 1);
+    memory_region_init_ram(ocmc23, NULL, "titanium.ocmc23", TITANIUM_OCMC23_SIZE,
+                           &error_fatal);
+    memory_region_add_subregion(sysmem, TITANIUM_OCMC23_BASE, ocmc23);
 
     /* QSPI flash memory-mapped window - holds the full ROM image */
     MemoryRegion *qspi = g_new(MemoryRegion, 1);
