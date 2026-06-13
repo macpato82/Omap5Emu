@@ -85,3 +85,21 @@ way to tell legitimate progress from garbage. Genuine further progress needs
 either a Debug=TRUE ROM (serial) or proper device models (real PRCM/clock/CTRL
 behaviour), not blind register fakes. The full RISC OS kernel boot still lies
 beyond the HAL.
+
+## Real PRCM model (replaces blind fakes)
+
+The CM is now modelled properly (CM_CORE_AON 0x4A005000, CM_CORE 0x4A008000):
+- DPLL/APLL lock: IDLEST registers are read-only; an unwritten CKGEN register
+  whose preceding CLKMODE was written nonzero reports locked (bit0). Written
+  config (CLKMODE/CLKSEL/DIV) is returned verbatim — fixing the earlier blanket
+  OR that corrupted dividers and sent the HAL to a garbage address.
+- CLKCTRL IDLEST (bits[17:16]) from MODULEMODE: DISABLE->DISABLED, ENABLE->FULL;
+  AUTO->IDLE for the CM_CORE_AON accelerator domains (DSP/EVE/IPU, unused by
+  RISC OS) and FULL for CM_CORE peripheral domains (USB etc., in use).
+- SerDes/PHY/PLL space (0x4A084000..0x4A098000: USB3 PHY OCP2SCP, DPLLCTRL_SATA)
+  reports ready for unwritten status reads.
+
+With this the boot advances *correctly* through CM -> USB3 PHY -> SATA PLL to
+~1243 blocks. Next genuine blocker: a translation-fault loop at VA 0xF9BFFFF0
+(HAL accessing an unmapped virtual address) - an MMU/mapping issue to resolve
+next, not a PRCM one.

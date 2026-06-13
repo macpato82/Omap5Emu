@@ -31,10 +31,10 @@ index aeaf654..9a855a9 100644
  
 diff --git a/hw/arm/titanium.c b/hw/arm/titanium.c
 new file mode 100644
-index 0000000..65ddcb6
+index 0000000..0acc51d
 --- /dev/null
 +++ b/hw/arm/titanium.c
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,486 @@
 +/*
 + * Elesar Titanium machine model (TI AM5728, dual Cortex-A15) - EXPERIMENTAL
 + *
@@ -182,20 +182,54 @@ index 0000000..65ddcb6
 +    }
 +
 +    /*
-+     * A register that software writes is a control register. Two cases:
-+     *  - CM_CORE_AON clock-domain state control (CM_*_CLKSTCTRL, ~0x4A005000):
-+     *    the boot writes a clock-domain transition request then polls the same
-+     *    register's state-status bits [17:16] for completion. Report the
-+     *    transition done so the poll exits.
-+     *  - Otherwise return the written value verbatim (so CLKCTRL IDLEST bits
-+     *    read back as 0 = FULL, satisfying "wait for module ready" loops).
++     * Clock Manager (PRCM) - proper model. CM_CORE_AON at 0x4A005000 and
++     * CM_CORE at 0x4A008000 (each <= 0x2000). Critically, status bits are
++     * synthesised ONLY on the right registers, leaving DPLL CLKSEL/divider
++     * config untouched (an earlier blanket OR of 0x30000 corrupted those and
++     * sent the HAL to a garbage address).
 +     */
-+    if (g_hash_table_contains(s->regs, key)) {
-+        uint32_t v = GPOINTER_TO_UINT(g_hash_table_lookup(s->regs, key));
-+        if (woff >= 0x06005000 && woff < 0x06006000) { /* CM_CORE_AON state */
-+            v |= 0x00030000;
++    {
++        uint32_t phys = 0x44000000 + (uint32_t)woff;
++        bool in_aon  = (phys >= 0x4A005000 && phys < 0x4A006000);
++        bool in_core = (phys >= 0x4A008000 && phys < 0x4A00A000);
++
++        if (in_aon || in_core) {
++            uint32_t stored = GPOINTER_TO_UINT(g_hash_table_lookup(s->regs, key));
++            uint32_t blkoff = phys & 0xfff;
++
++            /* CKGEN sub-blocks (~+0x100..+0x300) hold the (D/A)PLLs. The IDLEST
++               registers are read-only (never written) and sit at CLKMODE+4.
++               So: a *written* CKGEN register (CLKMODE/CLKSEL/DIV/...) is
++               returned verbatim (no corruption); an *unwritten* one whose
++               preceding CLKMODE was written nonzero is an IDLEST being polled
++               for lock -> report locked (bit0). Covers DPLLs and APLLs alike. */
++            if (blkoff >= 0x100 && blkoff < 0x300) {
++                if (g_hash_table_contains(s->regs, key)) {
++                    return stored;
++                }
++                uint32_t clkmode = GPOINTER_TO_UINT(g_hash_table_lookup(
++                    s->regs, GUINT_TO_POINTER((guint)(woff - 4))));
++                return (clkmode != 0) ? 1 : 0;
++            }
++
++            /* Domain blocks: CLKCTRL. IDLEST (bits[17:16]) reflects MODULEMODE
++               (bits[1:0]): DISABLE(0)->DISABLED(3); ENABLE(2)->FULL(0). For
++               AUTO(1) it depends on whether the module is actually used: the
++               CM_CORE_AON accelerator domains (DSP/EVE/IPU) are unused by RISC
++               OS and auto-idle (IDLE,2), while CM_CORE peripheral domains (USB,
++               etc.) are in use and reach FULL(0). Only these two bits are
++               synthesised; all other bits are preserved. */
++            uint32_t mm = stored & 3;
++            uint32_t idlest = (mm == 0) ? 3 :
++                              (mm == 2) ? 0 :
++                              (in_aon ? 2 : 0);
++            return (stored & ~0x00030000u) | (idlest << 16);
 +        }
-+        return v;
++    }
++
++    /* Other written registers: return verbatim. */
++    if (g_hash_table_contains(s->regs, key)) {
++        return GPOINTER_TO_UINT(g_hash_table_lookup(s->regs, key));
 +    }
 +
 +    /*
@@ -235,19 +269,20 @@ index 0000000..65ddcb6
 +        uint32_t prev = GPOINTER_TO_UINT(g_hash_table_lookup(s->regs,
 +                                        GUINT_TO_POINTER((guint)(woff - 4))));
 +        if (prev != 0) {
-+            return 3;
++            return 1;
 +        }
 +    }
 +
 +    /*
-+     * Clock-manager status words in the CM_CORE block (0x4A080000..0x4A0A0000:
-+     * the HAL-mapped CM_* clock-domain/IDLEST status the boot polls for ready
-+     * bits, not preceded by a written control reg). Report ready so the clock
-+     * bring-up polls complete. (CTRL_CORE at 0x4A002000 is below this range.)
++     * SerDes/PHY/PLL control space (~0x4A084000..0x4A098000): USB3 PHY
++     * (OCP2SCP) and the SATA/PCIe SerDes DPLLs (e.g. DPLLCTRL_SATA at
++     * 0x4A096800). The HAL brings these up and polls status (PLL lock, PHY
++     * ready). Report ready bits for unwritten status reads (written config is
++     * returned verbatim by the check above).
 +     */
 +    {
 +        uint32_t phys = 0x44000000 + (uint32_t)woff;
-+        if (phys >= 0x4A080000 && phys < 0x4A0A0000) {
++        if (phys >= 0x4A084000 && phys < 0x4A098000) {
 +            return 3;
 +        }
 +    }
