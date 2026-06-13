@@ -88,4 +88,4 @@ Next (Phase 2 continued):
   reference is [HAL_Titanium](https://gitlab.riscosopen.org/jlee/HAL_Titanium).
 - AM5728 register/address details from TI's AM5728 TRM.
 
-Developed with assistance from Claude Code.
+Developed by RISCOS Technologies
