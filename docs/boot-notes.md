@@ -73,3 +73,15 @@ RISC OS kernel boot, and model the **DSS/DISPC** so the framebuffer RISC OS sets
 up in DRAM can be displayed. This is a large, multi-peripheral effort, not a
 matter of a few more register stubs. A debug-enabled ROM build (Debug=TRUE),
 if obtainable from RISC OS Open, would be the only way to get serial output.
+
+## Blind-stubbing ceiling (no serial)
+
+With DSS DISPC + OMAP UART + reset/clock-status models, the boot reaches ~1243
+basic blocks (deep in HAL device init, ~0xFC01E000). But progress past the
+clock bring-up required faking CM status reads (return "ready"), and that leads
+the HAL to a translation-fault loop at an unmapped VA (0xF9BFFFF0) — i.e. faked
+values send it down an invalid path. Without serial observability there is no
+way to tell legitimate progress from garbage. Genuine further progress needs
+either a Debug=TRUE ROM (serial) or proper device models (real PRCM/clock/CTRL
+behaviour), not blind register fakes. The full RISC OS kernel boot still lies
+beyond the HAL.

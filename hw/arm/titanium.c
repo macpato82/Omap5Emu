@@ -191,13 +191,27 @@ static uint64_t titanium_l4_read(void *opaque, hwaddr off, unsigned size)
      * A register that is never written but sits immediately after a written
      * (nonzero) control register is a read-only status register the boot is
      * polling - DPLL lock (CM_IDLEST_DPLL after CM_CLKMODE_DPLL), clock/PRM
-     * transition-done, etc. Report ready (bit 0 set) so the poll completes.
+     * transition-done, etc. Report ready: bits 0 and 1 set, covering polls that
+     * wait on either bit (e.g. lock + transition-complete) so they complete.
      */
     if (woff >= 4) {
         uint32_t prev = GPOINTER_TO_UINT(g_hash_table_lookup(s->regs,
                                         GUINT_TO_POINTER((guint)(woff - 4))));
         if (prev != 0) {
-            return 1;
+            return 3;
+        }
+    }
+
+    /*
+     * Clock-manager status words in the CM_CORE block (0x4A080000..0x4A0A0000:
+     * the HAL-mapped CM_* clock-domain/IDLEST status the boot polls for ready
+     * bits, not preceded by a written control reg). Report ready so the clock
+     * bring-up polls complete. (CTRL_CORE at 0x4A002000 is below this range.)
+     */
+    {
+        uint32_t phys = 0x44000000 + (uint32_t)woff;
+        if (phys >= 0x4A080000 && phys < 0x4A0A0000) {
+            return 3;
         }
     }
     return 0;
