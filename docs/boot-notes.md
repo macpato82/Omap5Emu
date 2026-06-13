@@ -103,3 +103,50 @@ With this the boot advances *correctly* through CM -> USB3 PHY -> SATA PLL to
 ~1243 blocks. Next genuine blocker: a translation-fault loop at VA 0xF9BFFFF0
 (HAL accessing an unmapped virtual address) - an MMU/mapping issue to resolve
 next, not a PRCM one.
+
+## Debug ROM: serial observability achieved, 0xF9BFFFF0 confirmed as the kernel CAM
+
+A `Debug=TRUE` RISC OS 5.31 ROM (built from the ROOL source under RPCEmu+DDE,
+with HAL `Debug`, kernel `DebugROMInit` and `DebugHALTX` all forced on) boots in
+this machine with `-serial stdio` and, for the first time, narrates its progress
+over the OMAP UART:
+
+```
+12345TiTwentyTwo
+InitARM done
+RAM registered
+Entered HAL_Init
+PCIe link down (x2)
+PCI probing
+HAL initialised
+IICInit
+ClearWkspRAM
+HAL_CleanerSpace          <- last line, then hangs
+```
+
+`-d int` shows the hang is an infinite Data Abort loop (~1.1M aborts in 6 s):
+
+```
+ESR 0x25/0x9600007f, DFSR 0x80e (2nd-level page translation fault, WRITE)
+DFAR 0xf9bffff0, faulting PC 0xfc01e6b0, EL3->EL3, return to svc then re-fault
+```
+
+This independently confirms the long-suspected `0xF9BFFFF0` blocker is the
+**kernel building the CAM** (`Kernel/s/HAL`), not a HAL/PRCM issue:
+
+- After `HAL_CleanerSpace` the A15 returns "no cleaner space"; the ROM is
+  uncompressed, so the kernel jumps to "Allocate the CAM" (`Init_MapInRAM`).
+- The CAM is *cleared* top-down by `ConstructCAMfromPageTables`
+  (`STMDB a2!,{...}`) and faults on its **first** write at `0xf9bffff0`, so
+  `CAMTop = 0xf9c00000` and the CAM region was never actually page-mapped
+  (the later SVC/IRQ/heap allocations succeeded, so boot got this far).
+- The CAM size maths is self-consistent
+  (`MaxCamEntry = pages-1`, `SoftCamMapSize = ceil(pages/256)*4096 >= pages*16`),
+  so this is **not** a kernel computation bug.
+
+Conclusion: `Init_MapInRAM` maps the wrong/no physical RAM for the CAM, which
+points at the **HAL-supplied PhysRamTable / RAM-bank layout** — i.e. what
+`HAL_Titanium` derives from this machine's EMIF/DDR model versus real silicon.
+The fix belongs in the QEMU machine's memory-map/EMIF modelling, not the kernel.
+(Register-dump probes have been added to the debug kernel at the CAM mapping
+site and the fill loop to read out the exact bank/size/phys values next.)
