@@ -131,6 +131,19 @@ static uint64_t titanium_l4_read(void *opaque, hwaddr off, unsigned size)
     hwaddr woff = off & ~(hwaddr)3;
     gpointer key = GUINT_TO_POINTER((guint)woff);
 
+    if (getenv("TITANIUM_TRACE")) {
+        static GHashTable *cnt;
+        if (!cnt) {
+            cnt = g_hash_table_new(NULL, NULL);
+        }
+        guint c = GPOINTER_TO_UINT(g_hash_table_lookup(cnt, key)) + 1;
+        g_hash_table_insert(cnt, key, GUINT_TO_POINTER(c));
+        if (c == 200000) {
+            fprintf(stderr, "TITANIUM-L4: spin read at phys 0x%08x\n",
+                    (unsigned)(0x44000000 + woff));
+        }
+    }
+
     /*
      * A register that software writes is a control register. Two cases:
      *  - CM_CORE_AON clock-domain state control (CM_*_CLKSTCTRL, ~0x4A005000):
@@ -146,6 +159,32 @@ static uint64_t titanium_l4_read(void *opaque, hwaddr off, unsigned size)
             v |= 0x00030000;
         }
         return v;
+    }
+
+    /*
+     * Peripheral REVISION/IDR register at page offset 0x00. The HAL reads it
+     * to confirm a module is present and clocked (waits for nonzero). Scoped to
+     * the L4_PER (0x48000000) and L4_WKUP (0x4AE00000) peripheral regions so it
+     * doesn't affect PRCM/EMIF control registers that also live at offset 0x00.
+     */
+    if ((woff & 0xfff) == 0) {
+        uint32_t phys = 0x44000000 + (uint32_t)woff;
+        if ((phys >= 0x48000000 && phys < 0x49000000) ||
+            (phys >= 0x4AE00000 && phys < 0x4B000000)) {
+            return 0x50600801;   /* generic OMAP IP revision */
+        }
+    }
+
+    /*
+     * I2C_SYSS at page offset 0x90: bit0 = RDONE (reset done). The HAL resets
+     * the I2C controllers (L4_PER, 0x48060000..0x48080000) and polls SYSS for
+     * completion. Report reset done.
+     */
+    if ((woff & 0xfff) == 0x90) {
+        uint32_t phys = 0x44000000 + (uint32_t)woff;
+        if (phys >= 0x48060000 && phys < 0x48080000) {
+            return 1;
+        }
     }
 
     /*
@@ -169,6 +208,24 @@ static void titanium_l4_write(void *opaque, hwaddr off, uint64_t val,
 {
     TitaniumL4 *s = opaque;
     hwaddr woff = off & ~(hwaddr)3;
+
+    /*
+     * OMAP peripheral soft-reset, scoped to the L4_PER peripheral region
+     * (0x48000000..0x49000000: timers, GPIO, I2C, McSPI, ...). Their
+     * SYSCONFIG/TIOCP_CFG register is at page offset 0x10 and its SOFTRESET
+     * request bit (bit0 DMTimer-style, bit1 type-1 SYSCONFIG) self-clears once
+     * reset completes. Model reset as instantaneous by clearing those bits, so
+     * the HAL's "write SOFTRESET, poll until clear" loops finish. SYSSTATUS
+     * RESETDONE at 0x14 reads back set via the status heuristic. Scoped to
+     * L4_PER so it can't disturb PRCM/EMIF registers that also sit at off 0x10.
+     */
+    {
+        uint32_t phys = 0x44000000 + (uint32_t)woff;
+        if (phys >= 0x48000000 && phys < 0x49000000 &&
+            (woff & 0xfff) == 0x10) {
+            val &= ~(uint64_t)0x3;
+        }
+    }
 
     g_hash_table_insert(s->regs, GUINT_TO_POINTER((guint)woff),
                         GUINT_TO_POINTER((guint)val));
@@ -268,7 +325,7 @@ static void titanium_init(MachineState *machine)
     l4s->regs = g_hash_table_new(NULL, NULL);
     MemoryRegion *l4 = g_new(MemoryRegion, 1);
     memory_region_init_io(l4, NULL, &titanium_l4_ops, l4s,
-                          "titanium.l4stub", 0x0C000000);
+                          "titanium.l4stub", 0x18000000);
     memory_region_add_subregion_overlap(sysmem, 0x44000000, l4, -1);
 
     /*

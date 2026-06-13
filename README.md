@@ -77,13 +77,24 @@ Working:
 - Currently stops at an OMAP peripheral **soft-reset wait** (write `SOFTRESET`,
   poll the bit to self-clear) during device init.
 
-Next (Phase 2 continued):
-- This is the limit of the generic PRCM/status heuristic: each peripheral the
-  HAL now touches (timer, watchdog, UART, ...) needs its real reset/status
-  semantics. Implement proper device models — starting with the OMAP
-  SYSCONFIG/SYSSTATUS reset handshake and the timers — to carry the HAL to its
-  first `HAL_Debug` UART output (the banner).
-- Then full PRCM/CTRL/EMIF models, DSS display, MMC/SD, USB (xHCI), CPSW.
+The L4 PRCM/clock stub now models the specific behaviours the HAL device-init
+needs, all derived by tracing the real ROM:
+- DPLL lock (`CM_IDLEST_DPLL`), clock-domain transition status (CM_CORE_AON),
+- OMAP peripheral `SOFTRESET` self-clear (L4_PER SYSCONFIG/TIOCP_CFG at +0x10),
+- peripheral `REVISION` reads (L4_PER/L4_WKUP, +0x00) returning nonzero,
+- I2C `SYSS` `RDONE` (reset done), and a backed peripheral window up to QSPI
+  so PCIe/other probes don't abort.
+
+With these the HAL runs ~960 basic blocks: clocks → DDR → HAL load → MMU on →
+HAL at 0xFC000000 → device init (resets timers, probes GPIO/I2C/PCIe).
+
+Next (Phase 2 continued) — to reach the `HAL_Debug` UART banner:
+- Continue per-peripheral modelling as the HAL touches them (watchdog, more
+  timers/GPIO, CTRL pad config).
+- Crucially, replace the generic 16550 UART with a proper **OMAP UART** model
+  (MDR1 mode select, SYSC/SYSS, extra registers) — the 16550 alone won't honour
+  the HAL's OMAP-specific UART init, so the banner needs this.
+- Then full PRCM/CTRL/EMIF device models, DSS display, MMC/SD, USB (xHCI), CPSW.
 
 ### Boot progress reached (this milestone)
 
