@@ -407,6 +407,13 @@ static void titanium_init(MachineState *machine)
     titanium_uart_init(sysmem, TITANIUM_UART1_BASE,
                        pic[TITANIUM_UART1_IRQ], serial_hd(0));
 
+    /*
+     * DSS display controller (DISPC at 0x58001000). Provides the graphical
+     * console and scans out the GFX framebuffer RISC OS programs in DRAM, so
+     * the screen becomes visible once the kernel sets a mode.
+     */
+    sysbus_create_simple("titanium-dispc", 0x58001000, NULL);
+
     /* Boot via the emulated AM5728 mask-ROM GP path */
     titanium_load_rom(machine);
 }
