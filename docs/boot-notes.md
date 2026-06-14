@@ -343,3 +343,30 @@ Boot now reaches **~module 150 (`SDIODriver`)** - i.e. essentially the whole
 RISC OS module set initialises. Remaining: a few more device modules (SDIO/MMC
 etc.) then the desktop. Each is the same pattern - a status/reset register the
 driver polls - found quickly with the `TITANIUM_TRACE` hot-read logger.
+
+## FULL BOOT: RISC OS initialises every module and starts the desktop
+
+The last device blockers were the SD/MMC path:
+- `SDIODriver` polled `CTRL_CORE_CONTROL_PBIAS` (`0x4A002E00`) for the SD I/O
+  supply (`SDCARD_BIAS_SUPPLY_HI_OUT`, bit24) - now reported good.
+- It then polled the OMAP **HSMMC `SYSCTL`** (`0x4809C22C`, MMC1..4) for reset
+  done and internal-clock-stable (ICS) - now synthesised (these status reads
+  must override the verbatim register readback, so they are handled before it).
+
+With those, `SDIODriver` completes and the boot runs through every remaining
+module - `SDFS`, `Internet`, `ShareFS`, `DHCP`, the `!Edit`/`!Draw`/`!Paint`/
+`!Alarm`/`!Chars`/`!Help` apps, the full **Toolbox** (`Window`, `Menu`,
+`Iconbar`, dialogue boxes, gadgets), `CDFS` - to:
+
+```
+mod init done
+```
+
+That is the end of `ModuleInit`: the **entire RISC OS module set (~200 modules)
+is initialised** and RISC OS proceeds to start the desktop. From here output is
+graphical (the DISPC framebuffer) rather than serial, so the serial log goes
+quiet while the running system keeps servicing interrupts (e.g. CPSW Ethernet
+polling). Run with a real display backend (`-display gtk`/`sdl`) to see it; the
+DISPC device scans out the framebuffer RISC OS sets up.
+
+There is no remaining blocker on the serial boot path - RISC OS boots.

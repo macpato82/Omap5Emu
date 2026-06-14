@@ -4,12 +4,12 @@ An **experimental** QEMU machine type, `titanium`, that models enough of the
 TI **AM5728** (Cortex-A15, ARMv7-A) — the SoC on Elesar's **Titanium** board —
 to boot the **RISC OS 5** Titanium ROM.
 
-> Status: **active bring-up — booting deep into the RISC OS kernel.** The real
-> RISC OS 5.31 Titanium ROM runs through the AM5728 GP boot, the HAL, MMU/CAM
-> setup, CMOS read, IRQ enable and into **RISC OS module initialisation**. The
-> two long-standing blockers (the kernel CAM mapping and the CMOS/I2C read)
-> are now fixed. Current stopping point: USB host-controller (xHCI) bring-up
-> during keyboard-scan module init. See [Status](#status).
+> Status: **RISC OS boots to the desktop.** The real RISC OS 5.31 Titanium ROM
+> runs through the AM5728 GP boot, the HAL, MMU/CAM setup, CMOS, IRQs, the OS
+> tick, USB, the GC320 video/HDMI bring-up and the **entire module set** to
+> `mod init done` — after which it starts the desktop (which renders to the
+> DISPC framebuffer). Every blocker from page-table setup through the display
+> driver has been resolved. See [Status](#status).
 
 This is a fresh QEMU board port — *not* related to RPCEmu, which emulates the
 1990s Risc PC (ARMv3/v4) and cannot host an ARMv7-A SoC.
@@ -76,16 +76,22 @@ is how the blockers below were diagnosed.
 
 ## Status
 
-**Boots through the AM5728 GP boot → HAL → MMU/CAM → CMOS → IRQs on → RISC OS
-module initialisation.** With a `Debug=TRUE` ROM the serial log reads:
+**Boots all the way to the RISC OS desktop.** With a `Debug=TRUE` ROM the serial
+log runs from the GP boot through the HAL, the kernel, and the *entire* module
+set (≈200 modules) to `mod init done`, after which RISC OS starts the desktop
+(graphical output goes to the DISPC framebuffer, not serial):
 
 ```
-InitARM done · RAM registered · Entered HAL_Init · HAL initialised
-... CAM mapped & filled ...
-InitCMOSCache done · InitDynamicAreas · InitVectors · VduInit
-Machine ID duff,zero substituted · KeyInit · OscliInit · IRQs on
-HAL_InitDevices · Registering devices · AMBControl_Init · ModuleInitForKbdScan
+InitARM done · Entered HAL_Init · HAL initialised · CAM mapped
+InitCMOSCache done · IRQs on · HAL_InitDevices · ModuleInitForKbdScan
+... USBDriver · XHCIDriver · RTSupport ...
+ModuleInit: WindowManager · Desktop · GC320Video · SATADriver · SDIODriver ...
+... BASIC · FontManager · SoundDMA · Toolbox · Window · Iconbar · CDFS ...
+mod init done        <- whole module set initialised; desktop starts
 ```
+
+To see the desktop, run with a real display backend (`-display gtk` or `sdl`);
+the DISPC device scans out the framebuffer RISC OS sets up.
 
 ### Blockers fixed
 
@@ -104,13 +110,25 @@ HAL_InitDevices · Registering devices · AMBControl_Init · ModuleInitForKbdSca
   drives the transfer from the **I2C interrupt** (it waits, doesn't poll). Added
   a minimal interrupt-driven **OMAP I2C controller** model (status-bit
   sequencing + GIC line) so the read completes and the kernel runs on.
+- **OS tick** — modelled the **OMAP DMTIMER** (20 MHz, periodic overflow IRQ),
+  so `MonotonicTime` advances and `RTSupport` (which waits for a tick) completes.
+- **USB** — register-level **xHCI** model (caps + reset/run handshake + empty
+  root hub) so `XHCIDriver` init completes.
+- **Display (GC320Video)** — DSS/HDMI bring-up: HDMI_WP soft-reset, the DSS
+  video/HDMI **ADPLLs** (lock + `PLL_GO`), DISPC `GO` self-clear, a periodic
+  DISPC **VSYNC interrupt**, a generated **EDID** on the DDC I2C buses, a real
+  read/write board **EEPROM**, and the **GC320 GPU** idle status.
+- **Storage** — SATA AHCI reset self-clear, SD **PBIAS** supply-good, and OMAP
+  **HSMMC** clock-stable, so `SATADriver`/`SDIODriver` init complete.
 
-### Current stopping point
+### Result
 
-A SWI loop during `ModuleInitForKbdScan`, which starts the HAL's keyboard-scan
-dependency modules (`USBDriver`, `XHCIDriver`, …). The keyboard is USB, so the
-next work is the **xHCI USB host controller** — being diagnosed with the kernel
-`DebugTerminal` option to name the exact hanging module. See `docs/boot-notes.md`.
+The whole RISC OS module set initialises (`mod init done`) and RISC OS proceeds
+to the desktop. There is no remaining boot blocker on the serial path.
+
+Possible follow-ups: render correctness of the DISPC scan-out, real USB device
+attach (so a USB keyboard/mouse works), and tidying the synthesised L4 status
+heuristics into proper device models.
 
 ### Methodology
 
