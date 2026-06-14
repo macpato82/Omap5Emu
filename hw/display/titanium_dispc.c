@@ -224,16 +224,17 @@ static void dispc_update_geometry(TitaniumDISPCState *s)
 static void dispc_gfx_update(void *opaque)
 {
     TitaniumDISPCState *s = opaque;
-    DisplaySurface *surface = qemu_console_surface(s->con);
+    DisplaySurface *surface;
     uint32_t fmt = (s->regs[R_GFX_ATTRIBUTES] >> GFX_ATTR_FORMAT_SHIFT) &
                    GFX_ATTR_FORMAT_MASK;
     /* fmt: 0x6 = RGB16; 0x8/0x9/0xC/0xD = 32bpp; else (0..3) = CLUT8/8bpp */
     int bpp = (fmt == 0x6) ? 2 : (fmt >= 0x8) ? 4 : 1;
     drawfn fn = (bpp == 1) ? draw_line8 : (bpp == 2) ? draw_line16 : draw_line32;
-    int first = 0, last = 0;
-    int src_width;
+    int src_width, dstride, y;
+    int en = dispc_enabled(s);
+    uint8_t *src, *dst;
 
-    if (!dispc_enabled(s)) {
+    if (!en) {
         return;
     }
     dispc_update_geometry(s);
@@ -241,29 +242,61 @@ static void dispc_gfx_update(void *opaque)
         return;
     }
 
-    src_width = s->width * bpp;
-    if (!s->fbsection_valid) {
-        framebuffer_update_memory_section(&s->fbsection, get_system_memory(),
-                                          s->regs[R_GFX_BA_0],
-                                          s->height, src_width);
-        s->fbsection_valid = true;
+    /* Fetch the surface AFTER any resize so we never draw to a stale surface. */
+    surface = qemu_console_surface(s->con);
+    if (!surface) {
+        return;
     }
 
-    /* Force a full redraw every frame: the framebuffer is plain DRAM whose
-     * dirty-page tracking we can't rely on, so dirty-only updates would leave
-     * the screen stuck on the first (boot) frame. A 640x480 redraw is cheap. */
-    framebuffer_update_display(surface, &s->fbsection, s->width, s->height,
-                               src_width, s->width * 4, 0, 1 /* invalidate */,
-                               fn, s, &first, &last);
-    if (getenv("TITANIUM_DISPC_TRACE")) {
-        static int once;
-        if (!once++) {
-            fprintf(stderr, "[dispc] gfx_update %ux%u bpp=%d ba=%08x first=%d last=%d\n",
-                    s->width, s->height, bpp, s->regs[R_GFX_BA_0], first, last);
+    /*
+     * Read the framebuffer straight from guest DRAM and convert it line by line.
+     * We deliberately avoid framebuffer_update_display(): it sources pixels via a
+     * DIRTY_MEMORY_VGA snapshot, which we never enable on plain DRAM, so it would
+     * read zeros and leave the screen black. A direct read of a 640x480 frame is
+     * cheap and always shows the current contents.
+     */
+    /* Clamp to the surface so a lagging resize can never overflow it. */
+    {
+        int sw = surface_width(surface), sh = surface_height(surface);
+        if (s->width > sw || s->height > sh) {
+            return;
         }
     }
-    if (last >= first) {
-        dpy_gfx_update(s->con, 0, first, s->width, last - first + 1);
+
+    src_width = s->width * bpp;
+    dstride = surface_stride(surface);
+    src = g_malloc((size_t)src_width * s->height);
+    cpu_physical_memory_read(s->regs[R_GFX_BA_0], src,
+                             (size_t)src_width * s->height);
+    dst = surface_data(surface);
+    for (y = 0; y < s->height; y++) {
+        fn(s, dst + (size_t)y * dstride, src + (size_t)y * src_width,
+           s->width, 0);
+    }
+    g_free(src);
+
+    dpy_gfx_update(s->con, 0, 0, s->width, s->height);
+
+    /* Debug: dump the rendered display SURFACE (what the user sees) to a PPM. */
+    if (getenv("TITANIUM_SURF_DUMP")) {
+        static int n;
+        if (n++ % 120 == 119) {
+            FILE *f = fopen(getenv("TITANIUM_SURF_DUMP"), "wb");
+            if (f) {
+                fprintf(f, "P6\n%d %d\n255\n", s->width, s->height);
+                for (y = 0; y < s->height; y++) {
+                    uint8_t *row = dst + (size_t)y * dstride;
+                    for (int x = 0; x < s->width; x++) {
+                        uint32_t v = ((uint32_t *)row)[x];
+                        fputc((v >> 16) & 0xff, f);
+                        fputc((v >> 8) & 0xff, f);
+                        fputc(v & 0xff, f);
+                    }
+                }
+                fclose(f);
+                fprintf(stderr, "[dispc] surface dumped %dx%d\n", s->width, s->height);
+            }
+        }
     }
 }
 
