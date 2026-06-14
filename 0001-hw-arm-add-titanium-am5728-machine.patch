@@ -31,10 +31,10 @@ index aeaf654..9a855a9 100644
  
 diff --git a/hw/arm/titanium.c b/hw/arm/titanium.c
 new file mode 100644
-index 0000000..e7f3549
+index 0000000..09c34f8
 --- /dev/null
 +++ b/hw/arm/titanium.c
-@@ -0,0 +1,692 @@
+@@ -0,0 +1,850 @@
 +/*
 + * Elesar Titanium machine model (TI AM5728, dual Cortex-A15) - EXPERIMENTAL
 + *
@@ -68,6 +68,7 @@ index 0000000..e7f3549
 +#include "hw/char/serial-mm.h"
 +#include "hw/intc/arm_gic_common.h"
 +#include "hw/irq.h"
++#include "qemu/timer.h"
 +#include "system/system.h"
 +#include "system/address-spaces.h"
 +#include "qom/object.h"
@@ -525,6 +526,154 @@ index 0000000..e7f3549
 +}
 +
 +/*
++ * OMAP DMTIMER (AM5728) - the RISC OS HAL drives these for the OS tick and
++ * fine timing (HAL_TimerSetPeriod in HAL_Titanium s/Timers). The kernel
++ * programs TIMER2 as a ~100 Hz auto-reload overflow interrupt; that IRQ is
++ * what advances OS_ReadMonotonicTime. RTSupport's init spins until time
++ * advances, so without a real timer the boot hangs there.
++ *
++ * The timer is a 32-bit up-counter clocked at ClkOsc0 = 20 MHz. HAL_TimerSetPeriod
++ * writes TLDR = TCRR = (2^32 - period) and sets TCLR.AR|ST, so it overflows
++ * every `period` ticks; on overflow it sets IRQSTATUS[1] (OVF) and reloads TLDR.
++ * Registers (TRM): TIOCP_CFG 0x10, IRQSTATUS 0x28, IRQENABLE_SET 0x2C,
++ * IRQENABLE_CLR 0x30, TCLR 0x38, TCRR 0x3C, TLDR 0x40.
++ */
++#define TMR_FREQ        20000000        /* ClkOsc0 */
++#define TMR_IRQ_OVF     (1u << 1)
++#define TMR_TCLR_ST     (1u << 0)
++#define TMR_TCLR_AR     (1u << 1)
++
++typedef struct TitaniumTimer {
++    MemoryRegion mr;
++    qemu_irq irq;
++    QEMUTimer *qtimer;
++    uint32_t tldr, tcrr, tclr, irqstatus, irqenable, tiocp;
++    int64_t start_ns;       /* virtual time the current count began */
++    uint32_t start_tcrr;    /* TCRR value at start_ns */
++} TitaniumTimer;
++
++static void titanium_timer_update_irq(TitaniumTimer *t)
++{
++    int level = (t->irqstatus & t->irqenable & 0x7) != 0;
++    if (t->irq) {
++        qemu_set_irq(t->irq, level);
++    }
++}
++
++/* Current up-counter value, extrapolated from elapsed virtual time. */
++static uint32_t titanium_timer_count(TitaniumTimer *t)
++{
++    if (!(t->tclr & TMR_TCLR_ST)) {
++        return t->tcrr;
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    uint64_t elapsed = muldiv64(now - t->start_ns, TMR_FREQ, 1000000000);
++    return (uint32_t)(t->start_tcrr + elapsed);
++}
++
++static void titanium_timer_arm(TitaniumTimer *t)
++{
++    if (!(t->tclr & TMR_TCLR_ST)) {
++        timer_del(t->qtimer);
++        return;
++    }
++    uint64_t ticks = 0x100000000ULL - t->tcrr;   /* ticks until overflow */
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    t->start_ns = now;
++    t->start_tcrr = t->tcrr;
++    timer_mod(t->qtimer, now + muldiv64(ticks, 1000000000, TMR_FREQ));
++}
++
++static void titanium_timer_cb(void *opaque)
++{
++    TitaniumTimer *t = opaque;
++
++    t->irqstatus |= TMR_IRQ_OVF;
++    titanium_timer_update_irq(t);
++    if (t->tclr & TMR_TCLR_ST) {
++        t->tcrr = (t->tclr & TMR_TCLR_AR) ? t->tldr : 0;
++        titanium_timer_arm(t);
++    }
++}
++
++static uint64_t titanium_timer_read(void *opaque, hwaddr off, unsigned size)
++{
++    TitaniumTimer *t = opaque;
++
++    switch (off & 0xff) {
++    case 0x00: return 0x40000100;          /* TIDR: plausible revision */
++    case 0x10: return t->tiocp;            /* TIOCP_CFG */
++    case 0x24:                             /* IRQSTATUS_RAW */
++    case 0x28: return t->irqstatus;        /* IRQSTATUS */
++    case 0x2c:                             /* IRQENABLE_SET */
++    case 0x30: return t->irqenable;        /* IRQENABLE_CLR */
++    case 0x38: return t->tclr;             /* TCLR */
++    case 0x3c: return titanium_timer_count(t); /* TCRR */
++    case 0x40: return t->tldr;             /* TLDR */
++    case 0x48: return 0;                   /* TWPS: no writes pending */
++    default:   return 0;
++    }
++}
++
++static void titanium_timer_write(void *opaque, hwaddr off, uint64_t val,
++                                 unsigned size)
++{
++    TitaniumTimer *t = opaque;
++
++    switch (off & 0xff) {
++    case 0x10: /* TIOCP_CFG: SOFTRESET (bit0) self-clears */
++        t->tiocp = (uint32_t)val & ~1u;
++        break;
++    case 0x28: /* IRQSTATUS - W1C */
++        t->irqstatus &= ~(uint32_t)val;
++        titanium_timer_update_irq(t);
++        break;
++    case 0x2c: /* IRQENABLE_SET */
++        t->irqenable |= (uint32_t)val;
++        titanium_timer_update_irq(t);
++        break;
++    case 0x30: /* IRQENABLE_CLR */
++        t->irqenable &= ~(uint32_t)val;
++        titanium_timer_update_irq(t);
++        break;
++    case 0x38: /* TCLR */
++        t->tcrr = titanium_timer_count(t);   /* latch before changing run state */
++        t->tclr = (uint32_t)val;
++        titanium_timer_arm(t);
++        break;
++    case 0x3c: /* TCRR */
++        t->tcrr = (uint32_t)val;
++        if (t->tclr & TMR_TCLR_ST) {
++            titanium_timer_arm(t);
++        }
++        break;
++    case 0x40: /* TLDR */
++        t->tldr = (uint32_t)val;
++        break;
++    default:
++        break;
++    }
++}
++
++static const MemoryRegionOps titanium_timer_ops = {
++    .read = titanium_timer_read,
++    .write = titanium_timer_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 1,
++    .valid.max_access_size = 4,
++};
++
++static void titanium_timer_init(MemoryRegion *sysmem, hwaddr base,
++                                const char *name, qemu_irq irq)
++{
++    TitaniumTimer *t = g_new0(TitaniumTimer, 1);
++    t->irq = irq;
++    t->qtimer = timer_new_ns(QEMU_CLOCK_VIRTUAL, titanium_timer_cb, t);
++    memory_region_init_io(&t->mr, NULL, &titanium_timer_ops, t, name, 0x1000);
++    memory_region_add_subregion_overlap(sysmem, base, &t->mr, 0);
++}
++
++/*
 + * OMAP UART extension registers (above the 16550 core at offset 0x20).
 + *
 + * The 16550-compatible part (RHR/THR/IER/LCR/LSR/... at 0x00-0x1C) is handled
@@ -694,6 +843,15 @@ index 0000000..e7f3549
 +    titanium_i2c_init(sysmem, 0x48070000, "titanium.i2c1", pic[56]); /* DevNoIIC0 */
 +    titanium_i2c_init(sysmem, 0x4807A000, "titanium.i2c4", pic[62]); /* DevNoIIC1 */
 +    titanium_i2c_init(sysmem, 0x4807C000, "titanium.i2c5", pic[60]); /* DevNoIIC2 */
++
++    /* OMAP DMTIMERs - the kernel uses these for the OS tick (MonotonicTime) and
++     * fine timing. TIMER2..11, IRQs from HAL DevNoTimer0..5 in StaticWS. */
++    titanium_timer_init(sysmem, 0x48032000, "titanium.timer2",  pic[38]);
++    titanium_timer_init(sysmem, 0x48034000, "titanium.timer3",  pic[39]);
++    titanium_timer_init(sysmem, 0x48036000, "titanium.timer4",  pic[40]);
++    titanium_timer_init(sysmem, 0x4803E000, "titanium.timer9",  pic[45]);
++    titanium_timer_init(sysmem, 0x48086000, "titanium.timer10", pic[46]);
++    titanium_timer_init(sysmem, 0x48088000, "titanium.timer11", pic[47]);
 +
 +    /* UART1 - the HAL's debug port (16550 core + OMAP extension registers) */
 +    titanium_uart_init(sysmem, TITANIUM_UART1_BASE,

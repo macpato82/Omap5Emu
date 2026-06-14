@@ -232,5 +232,46 @@ SVC immediates in the loop indicate a higher-level retry path, not a single poll
 The kernel already prints `"init mod <name>"` per module during ROM init, but via
 the OS VDU path (`OS_WriteS`/`OS_Write0`), which isn't routed to the serial port.
 Enabling the kernel `DebugTerminal` option (route OS `WRCH`/`RDCH` through the HAL
-serial) will surface every module name and pinpoint the exact module that hangs -
-that is the next diagnostic step.
+serial) surfaces every module name.
+
+## FIXED: the OS tick - modelled the OMAP DMTIMER (RISC OS reaches the `*` prompt)
+
+With `DebugTerminal` on, the per-module trace showed the hang was not USB but
+`RTSupport`. Its `module_Initialise` (`Programmer/RTSupport/c/module`) spins:
+
+```c
+_swix(OS_ReadMonotonicTime, _OUT(0), &t0);
+do { _swix(OS_ReadMonotonicTime, _OUT(0), &t1); }
+while (VectorClaimAddress == 0 && t1 == t0);
+```
+
+i.e. it waits for monotonic time to advance one tick - and it never did, because
+the OS tick is driven by an **OMAP DMTIMER** overflow interrupt that we did not
+model. (RTSupport is simply the first thing that *waits* on time, which is why it
+surfaced here.) The HAL (`HAL_Titanium s/Timers`) clocks the timers from
+`ClkOsc0 = 20 MHz`; `HAL_TimerSetPeriod` writes `TLDR = TCRR = 2^32 - period`,
+enables overflow + auto-reload, so OVF fires every `period` ticks.
+
+Added a DMTIMER model (`QEMUTimer`-based) for TIMER2/3/4/9/10/11 at
+`0x48032000`/`34000`/`36000`/`3E000` and `0x48086000`/`88000`, IRQs 38/39/40/45/46/47
+(HAL `DevNoTimer0..5`). It's a 20 MHz up-counter that raises `IRQSTATUS[1]` (OVF)
+and its GIC line on overflow, auto-reloading from `TLDR`; `TCRR` reads are
+extrapolated from elapsed virtual time.
+
+With the tick running, the boot completes RTSupport, USBDriver, and reaches the
+RISC OS **`*` supervisor prompt** - i.e. RISC OS is essentially up:
+
+```
+init mod RTSupport / USBDriver / XHCIDriver
+Error: DataAbort:Abort on data transfer at &FC1FED04
+*
+```
+
+### Current stopping point
+
+`XHCIDriver` init faults (alignment fault, `DFSR 0x1`, data address `0xf8c90005`):
+the unmodelled xHCI capability registers read back as 0, so the driver
+miscomputes a register offset and makes an unaligned access. RISC OS catches the
+error and drops to the supervisor prompt. Next work: a minimal **xHCI USB host
+controller** model (sane CAPLENGTH/HCSPARAMS + "halted, no ports") so USB init
+completes and full boot continues.
