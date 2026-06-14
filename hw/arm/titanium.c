@@ -34,6 +34,9 @@
 #include "qemu/timer.h"
 #include "hw/display/edid.h"
 #include "hw/usb/xhci.h"
+#include "hw/ide/ahci-sysbus.h"
+#include "hw/ide/ahci.h"
+#include "system/blockdev.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
 #include "qom/object.h"
@@ -1122,6 +1125,26 @@ static void titanium_init(MachineState *machine)
      * supports a relative mouse, NOT the absolute usb-tablet). */
     /* USB2: keep the lightweight stub (no devices) so its driver init completes. */
     titanium_xhci_init(sysmem, 0x488D0000, "titanium.xhci2", pic[78]);
+
+    /* SATA: the AM5728 SATA HBA at 0x4A140000 is standard AHCI, which RISC OS's
+     * SATADriver drives. Use QEMU's real AHCI so a disc image can be attached:
+     *   -drive if=ide,file=<disc.img>,format=raw
+     * RISC OS then sees a hard disc and can boot !Boot from it. The SATA
+     * PHY/wrapper/PLL bring-up is still served by the L4 stub, so SATAInit
+     * completes as before; only the HBA register block is now backed for real. */
+    {
+        DeviceState *ahci = qdev_new(TYPE_SYSBUS_AHCI);
+        qdev_prop_set_uint32(ahci, "num-ports", 1);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ahci), &error_fatal);
+        memory_region_add_subregion_overlap(sysmem, 0x4A140000,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(ahci), 0), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ahci), 0, pic[54]); /* DevNoSATA */
+        {
+            DriveInfo *hd[1];
+            hd[0] = drive_get(IF_IDE, 0, 0);
+            ahci_ide_create_devs(&SYSBUS_AHCI(ahci)->ahci, hd);
+        }
+    }
 
     /* UART1 - the HAL's debug port (16550 core + OMAP extension registers) */
     titanium_uart_init(sysmem, TITANIUM_UART1_BASE,
