@@ -139,11 +139,28 @@ host base `0x48890000` (its 0x4000 MMIO sits below the DWC3 global registers at
     -device usb-kbd -device usb-mouse
 ```
 
-RISC OS's `XHCIDriver` enumerates them through the real controller (verified: the
-kernel stops reporting "No keyboard present", and host key/mouse events reach the
-desktop). Use **`usb-mouse`** (relative) - RISC OS's USB HID does **not** drive
-the absolute `usb-tablet`. In the window, **click to give it focus** (for the
-keyboard) and to grab the relative mouse; `Ctrl+Alt+G` toggles the grab.
+RISC OS's `XHCIDriver` enumerates the keyboard through the real controller, and
+**host keyboard input reaches the RISC OS Wimp end-to-end** (verified visually:
+keys drive the boot dialog's buttons; the kernel also stops reporting "No keyboard
+present"). The **mouse is not yet working**: RISC OS's USB HID mouse driver
+(`usbmouse`, which parses the HID report descriptor and switches the device to
+report protocol) does not bind QEMU's `usb-mouse`, so the pointer does not move —
+this is a known limitation under investigation. The absolute `usb-tablet` is not
+driven by RISC OS either.
+
+**Display / host input on Wayland.** If you run `-display sdl` on a Wayland
+session (e.g. KDE) and input does nothing even after clicking to focus and
+`Ctrl+Alt+G` to grab, SDL's native-Wayland backend may not forward events. Force
+it through XWayland:
+
+```sh
+SDL_VIDEODRIVER=x11 ./build/qemu-system-arm -M titanium -bios TITANIUM.ROM \
+    -display sdl -device usb-kbd -device usb-mouse
+```
+
+VNC is also supported (`-vnc 127.0.0.1:1`) as a backend-independent display path,
+though it is keyboard-only for RISC OS (VNC sends absolute pointer coordinates,
+which RISC OS's relative-only pointer cannot consume).
 
 Possible follow-ups: a real colour CLUT for the 8bpp framebuffer (currently
 grayscale), and tidying the synthesised L4 status heuristics into proper device
