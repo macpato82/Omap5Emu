@@ -60,6 +60,7 @@ struct TitaniumDISPCState {
     QemuConsole *con;
 
     uint32_t regs[0x1000 / 4];
+    uint32_t palette[256];   /* CLUT8 palette (index -> 0x00RRGGBB), loaded via 0x630 */
     uint32_t width, height;
     bool fbsection_valid;
     int invalidate;
@@ -183,9 +184,11 @@ static void draw_line16(void *opaque, uint8_t *d, const uint8_t *s,
 static void draw_line8(void *opaque, uint8_t *d, const uint8_t *s,
                        int width, int deststep)
 {
+    TitaniumDISPCState *st = opaque;
     while (width--) {
-        uint8_t v = *s;
-        *(uint32_t *)d = rgb_to_pixel32(v, v, v);
+        uint32_t rgb = st->palette[*s];   /* 0x00RRGGBB from the CLUT */
+        *(uint32_t *)d = rgb_to_pixel32((rgb >> 16) & 0xff,
+                                        (rgb >> 8) & 0xff, rgb & 0xff);
         s += 1;
         d += 4;
     }
@@ -407,6 +410,13 @@ static void dispc_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 
     s->regs[(addr >> 2) & 0x3ff] = (uint32_t)val;
 
+    /* CLUT8 palette load: RISC OS writes 256 entries to 0x630, each value
+     * encoded as (index << 24) | (R << 16) | (G << 8) | B. */
+    if ((addr >> 2) == (0x630 >> 2)) {
+        s->palette[(val >> 24) & 0xff] = (uint32_t)val & 0x00ffffff;
+        return;
+    }
+
     if ((addr >> 2) == R_IRQENABLE) {
         dispc_update_irq(s);
         return;
@@ -467,6 +477,11 @@ static void dispc_reset_hold(Object *obj, ResetType type)
     TitaniumDISPCState *s = TITANIUM_DISPC(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
+    /* Default to a grayscale ramp until RISC OS loads its CLUT, so an
+     * unprogrammed 8bpp framebuffer still shows something sensible. */
+    for (int i = 0; i < 256; i++) {
+        s->palette[i] = (i << 16) | (i << 8) | i;
+    }
     s->width = s->height = 0;
     s->fbsection_valid = false;
     s->invalidate = 1;

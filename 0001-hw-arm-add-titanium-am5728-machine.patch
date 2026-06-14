@@ -1192,10 +1192,10 @@ index 90e6c04..85ca229 100644
  system_ss.add(when: 'CONFIG_SSD0323', if_true: files('ssd0323.c'))
 diff --git a/hw/display/titanium_dispc.c b/hw/display/titanium_dispc.c
 new file mode 100644
-index 0000000..4f9b983
+index 0000000..a734b0b
 --- /dev/null
 +++ b/hw/display/titanium_dispc.c
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,511 @@
 +/*
 + * TI AM5728 DSS / DISPC display controller — minimal framebuffer scan-out
 + * for the Elesar Titanium machine (RISC OS 5).
@@ -1258,6 +1258,7 @@ index 0000000..4f9b983
 +    QemuConsole *con;
 +
 +    uint32_t regs[0x1000 / 4];
++    uint32_t palette[256];   /* CLUT8 palette (index -> 0x00RRGGBB), loaded via 0x630 */
 +    uint32_t width, height;
 +    bool fbsection_valid;
 +    int invalidate;
@@ -1381,9 +1382,11 @@ index 0000000..4f9b983
 +static void draw_line8(void *opaque, uint8_t *d, const uint8_t *s,
 +                       int width, int deststep)
 +{
++    TitaniumDISPCState *st = opaque;
 +    while (width--) {
-+        uint8_t v = *s;
-+        *(uint32_t *)d = rgb_to_pixel32(v, v, v);
++        uint32_t rgb = st->palette[*s];   /* 0x00RRGGBB from the CLUT */
++        *(uint32_t *)d = rgb_to_pixel32((rgb >> 16) & 0xff,
++                                        (rgb >> 8) & 0xff, rgb & 0xff);
 +        s += 1;
 +        d += 4;
 +    }
@@ -1605,6 +1608,13 @@ index 0000000..4f9b983
 +
 +    s->regs[(addr >> 2) & 0x3ff] = (uint32_t)val;
 +
++    /* CLUT8 palette load: RISC OS writes 256 entries to 0x630, each value
++     * encoded as (index << 24) | (R << 16) | (G << 8) | B. */
++    if ((addr >> 2) == (0x630 >> 2)) {
++        s->palette[(val >> 24) & 0xff] = (uint32_t)val & 0x00ffffff;
++        return;
++    }
++
 +    if ((addr >> 2) == R_IRQENABLE) {
 +        dispc_update_irq(s);
 +        return;
@@ -1665,6 +1675,11 @@ index 0000000..4f9b983
 +    TitaniumDISPCState *s = TITANIUM_DISPC(obj);
 +
 +    memset(s->regs, 0, sizeof(s->regs));
++    /* Default to a grayscale ramp until RISC OS loads its CLUT, so an
++     * unprogrammed 8bpp framebuffer still shows something sensible. */
++    for (int i = 0; i < 256; i++) {
++        s->palette[i] = (i << 16) | (i << 8) | i;
++    }
 +    s->width = s->height = 0;
 +    s->fbsection_valid = false;
 +    s->invalidate = 1;
