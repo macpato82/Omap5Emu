@@ -275,6 +275,65 @@ static void dispc_gfx_update(void *opaque)
     }
     g_free(src);
 
+    /*
+     * Composite the hardware mouse pointer. RISC OS (the GC320Video driver)
+     * advertises GVDisplayFeature_HardwarePointer, so it does NOT draw the
+     * pointer into the GFX framebuffer: it programs a 32x32 ARGB sprite on a
+     * DISPC VID overlay and moves it by rewriting the overlay POSITION every
+     * frame. We only scanned out the GFX layer, so the pointer was invisible
+     * even though the mouse works. Overlay registers (found by tracing the
+     * live driver): 0x14C base addr, 0x154 POSITION (X | Y<<16), 0x158 SIZE
+     * ((w-1) | (h-1)<<16), 0x15C ATTRIBUTES (bit0 = enable, format 0xC ARGB32).
+     */
+    {
+        uint32_t attr  = s->regs[0x15c / 4];
+        uint32_t cbase = s->regs[0x14c / 4];
+        if ((attr & 1) && cbase != 0) {
+            uint32_t pos = s->regs[0x154 / 4];
+            uint32_t csz = s->regs[0x158 / 4];
+            int cw = (int)(csz & 0x7ff) + 1;
+            int ch = (int)((csz >> 16) & 0x7ff) + 1;
+            int px = (int)(pos & 0xffff);
+            int py = (int)((pos >> 16) & 0xffff);
+            if (cw > 0 && cw <= 256 && ch > 0 && ch <= 256) {
+                uint32_t *cur = g_malloc((size_t)cw * ch * 4);
+                cpu_physical_memory_read(cbase, cur, (size_t)cw * ch * 4);
+                for (int cy = 0; cy < ch; cy++) {
+                    int sy = py + cy;
+                    if (sy < 0 || sy >= s->height) {
+                        continue;
+                    }
+                    uint32_t *drow = (uint32_t *)(dst + (size_t)sy * dstride);
+                    for (int cx = 0; cx < cw; cx++) {
+                        int sx = px + cx;
+                        if (sx < 0 || sx >= s->width) {
+                            continue;
+                        }
+                        uint32_t p = cur[cy * cw + cx];   /* ARGB8888 */
+                        uint32_t a = p >> 24;
+                        uint32_t r = (p >> 16) & 0xff;
+                        uint32_t g = (p >> 8) & 0xff;
+                        uint32_t b = p & 0xff;
+                        if (a == 0) {
+                            continue;
+                        }
+                        if (a != 0xff) {
+                            uint32_t o = drow[sx];
+                            uint32_t orr = (o >> 16) & 0xff;
+                            uint32_t og = (o >> 8) & 0xff;
+                            uint32_t ob = o & 0xff;
+                            r = (r * a + orr * (255 - a)) / 255;
+                            g = (g * a + og * (255 - a)) / 255;
+                            b = (b * a + ob * (255 - a)) / 255;
+                        }
+                        drow[sx] = rgb_to_pixel32(r, g, b);
+                    }
+                }
+                g_free(cur);
+            }
+        }
+    }
+
     dpy_gfx_update(s->con, 0, 0, s->width, s->height);
 
     /* Debug: dump the rendered display SURFACE (what the user sees) to a PPM. */

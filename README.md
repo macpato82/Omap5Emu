@@ -139,14 +139,18 @@ host base `0x48890000` (its 0x4000 MMIO sits below the DWC3 global registers at
     -device usb-kbd -device usb-mouse
 ```
 
-RISC OS's `XHCIDriver` enumerates the keyboard through the real controller, and
-**host keyboard input reaches the RISC OS Wimp end-to-end** (verified visually:
-keys drive the boot dialog's buttons; the kernel also stops reporting "No keyboard
-present"). The **mouse is not yet working**: RISC OS's USB HID mouse driver
-(`usbmouse`, which parses the HID report descriptor and switches the device to
-report protocol) does not bind QEMU's `usb-mouse`, so the pointer does not move —
-this is a known limitation under investigation. The absolute `usb-tablet` is not
-driven by RISC OS either.
+RISC OS's `XHCIDriver` enumerates both devices through the real controller, and
+**host keyboard *and* mouse input reach RISC OS end-to-end** (verified visually).
+Use the **relative** `usb-mouse` (RISC OS does not drive the absolute `usb-tablet`).
+
+The mouse pointer is rendered by a **DISPC hardware-cursor overlay**, not drawn
+into the GFX framebuffer: RISC OS's video driver advertises
+`GVDisplayFeature_HardwarePointer` and programs a 32x32 ARGB sprite on a DISPC
+VID overlay (base/position/size at `0x14C`/`0x154`/`0x158`), moving it by
+rewriting the overlay position each frame. `titanium_dispc.c` therefore
+**composites that overlay on top of the GFX layer** (alpha-blended) — without it
+the pointer is invisible even though the mouse works. The pointer arrow now
+appears and tracks the mouse, and clicks reach the Wimp.
 
 **Display / host input on Wayland.** If you run `-display sdl` on a Wayland
 session (e.g. KDE) and input does nothing even after clicking to focus and
@@ -159,8 +163,9 @@ SDL_VIDEODRIVER=x11 ./build/qemu-system-arm -M titanium -bios TITANIUM.ROM \
 ```
 
 VNC is also supported (`-vnc 127.0.0.1:1`) as a backend-independent display path,
-though it is keyboard-only for RISC OS (VNC sends absolute pointer coordinates,
-which RISC OS's relative-only pointer cannot consume).
+which is the most reliable option when a Wayland compositor will not forward
+input to the SDL window. (VNC sends absolute pointer coordinates; QEMU converts
+them to relative motion for the `usb-mouse`.)
 
 Possible follow-ups: a real colour CLUT for the 8bpp framebuffer (currently
 grayscale), and tidying the synthesised L4 status heuristics into proper device
