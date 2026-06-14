@@ -33,6 +33,7 @@
 #include "hw/irq.h"
 #include "qemu/timer.h"
 #include "hw/display/edid.h"
+#include "hw/usb/xhci.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
 #include "qom/object.h"
@@ -1069,9 +1070,23 @@ static void titanium_init(MachineState *machine)
     titanium_timer_init(sysmem, 0x48086000, "titanium.timer10", pic[46]);
     titanium_timer_init(sysmem, 0x48088000, "titanium.timer11", pic[47]);
 
-    /* xHCI USB host controllers (host side of the DWC3 cores). USB1 core at
-     * 0x48890000, USB2 at 0x488D0000; IRQs from HAL DevNoUSB0/1 (76/78). */
-    titanium_xhci_init(sysmem, 0x48890000, "titanium.xhci1", pic[76]);
+    /* USB1: a REAL QEMU xHCI controller (sysbus) at the DWC3 host base
+     * 0x48890000, so RISC OS's XHCIDriver can enumerate USB HID devices
+     * (add -device usb-kbd / -device usb-mouse). Its MMIO is 0x4000, below the
+     * DWC3 global registers at +0xC100, which the L4 stub still serves for the
+     * HAL. DMA targets system memory (where RISC OS builds the xHCI rings). */
+    {
+        DeviceState *xhci = qdev_new(TYPE_XHCI_SYSBUS);
+        qdev_prop_set_uint32(xhci, "intrs", 1);
+        qdev_prop_set_uint32(xhci, "slots", 32);
+        object_property_set_link(OBJECT(xhci), "dma",
+                                 OBJECT(get_system_memory()), &error_fatal);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(xhci), &error_fatal);
+        memory_region_add_subregion_overlap(sysmem, 0x48890000,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(xhci), 0), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(xhci), 0, pic[76]); /* DevNoUSB0 */
+    }
+    /* USB2: keep the lightweight stub (no devices) so its driver init completes. */
     titanium_xhci_init(sysmem, 0x488D0000, "titanium.xhci2", pic[78]);
 
     /* UART1 - the HAL's debug port (16550 core + OMAP extension registers) */

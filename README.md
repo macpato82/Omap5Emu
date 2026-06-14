@@ -123,12 +123,27 @@ the DISPC device scans out the framebuffer RISC OS sets up.
 
 ### Result
 
-The whole RISC OS module set initialises (`mod init done`) and RISC OS proceeds
-to the desktop. There is no remaining boot blocker on the serial path.
+The whole RISC OS module set initialises (`mod init done`) and RISC OS boots to
+the **graphical desktop**, shown live with `-display sdl`. With a USB keyboard
+attached RISC OS detects it and boots interactively.
 
-Possible follow-ups: render correctness of the DISPC scan-out, real USB device
-attach (so a USB keyboard/mouse works), and tidying the synthesised L4 status
-heuristics into proper device models.
+### USB input (keyboard / mouse)
+
+USB1's xHCI host is a **real QEMU xHCI controller** (`sysbus-xhci`) at the DWC3
+host base `0x48890000` (its 0x4000 MMIO sits below the DWC3 global registers at
+`+0xC100`, which the L4 stub still serves for the HAL). Attach standard USB HID:
+
+```sh
+./build/qemu-system-arm -M titanium -bios TITANIUM.ROM -display sdl \
+    -device usb-kbd -device usb-tablet
+```
+
+RISC OS's `XHCIDriver` enumerates them through the real controller - confirmed by
+the kernel no longer reporting "No keyboard present" - so the desktop is usable.
+
+Possible follow-ups: a real colour CLUT for the 8bpp framebuffer (currently
+grayscale), and tidying the synthesised L4 status heuristics into proper device
+models.
 
 ### Methodology
 
