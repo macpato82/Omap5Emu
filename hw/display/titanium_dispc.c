@@ -392,6 +392,12 @@ static void dispc_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
     s->con = graphic_console_init(dev, 0, &dispc_gfx_ops, s);
+    /* Size the console once, here, so the display backend binds to a stable
+     * surface. Resizing from inside gfx_update (which runs during the backend's
+     * own refresh) is re-entrant and leaves SDL rendering a stale surface. */
+    s->width = 640;
+    s->height = 480;
+    qemu_console_resize(s->con, s->width, s->height);
     s->vsync = timer_new_ns(QEMU_CLOCK_VIRTUAL, dispc_vsync_tick, s);
     timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NANOSECONDS_PER_SECOND / DISPC_VSYNC_HZ);
