@@ -18,7 +18,9 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "ui/console.h"
 #include "ui/surface.h"
 #include "hw/display/framebuffer.h"
@@ -31,10 +33,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(TitaniumDISPCState, TITANIUM_DISPC)
 
 #define R_REVISION       (0x00 / 4)
 #define R_SYSSTATUS      (0x14 / 4)
+#define R_IRQSTATUS      (0x18 / 4)
+#define R_IRQENABLE      (0x1C / 4)
 #define R_CONTROL1       (0x40 / 4)
 #define R_GFX_BA_0       (0x80 / 4)
 #define R_GFX_SIZE       (0x8C / 4)
 #define R_GFX_ATTRIBUTES (0xA0 / 4)
+
+#define DISPC_IRQ_FRAMEDONE (1u << 0)
+#define DISPC_IRQ_VSYNC     (1u << 1)
+#define DISPC_VSYNC_HZ      60
 
 #define CONTROL1_LCDENABLE     (1u << 0)
 #define CONTROL1_DIGITALENABLE (1u << 1)
@@ -53,7 +61,27 @@ struct TitaniumDISPCState {
     uint32_t width, height;
     bool fbsection_valid;
     int invalidate;
+
+    qemu_irq irq;
+    QEMUTimer *vsync;
 };
+
+/* The video driver enables DISPC_IRQENABLE.VSYNC and waits for the interrupt
+ * before it considers the display up, so we must raise a periodic VSYNC. */
+static void dispc_update_irq(TitaniumDISPCState *s)
+{
+    qemu_set_irq(s->irq, (s->regs[R_IRQSTATUS] & s->regs[R_IRQENABLE]) != 0);
+}
+
+static void dispc_vsync_tick(void *opaque)
+{
+    TitaniumDISPCState *s = opaque;
+
+    s->regs[R_IRQSTATUS] |= DISPC_IRQ_VSYNC;
+    dispc_update_irq(s);
+    timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              NANOSECONDS_PER_SECOND / DISPC_VSYNC_HZ);
+}
 
 /* Source framebuffer line -> surface (xRGB8888). RISC OS uses BGRx order. */
 static void draw_line32(void *opaque, uint8_t *d, const uint8_t *s,
@@ -153,19 +181,48 @@ static void dispc_invalidate(void *opaque)
 static uint64_t dispc_read(void *opaque, hwaddr addr, unsigned size)
 {
     TitaniumDISPCState *s = opaque;
+    uint64_t v;
 
     switch (addr >> 2) {
-    case R_REVISION:  return 0x00000061;   /* DISPC v6.1-ish, nonzero */
-    case R_SYSSTATUS: return 1;            /* RESETDONE */
-    default:          return s->regs[(addr >> 2) & 0x3ff];
+    case R_REVISION:  v = 0x00000061; break;   /* DISPC v6.1-ish, nonzero */
+    case R_SYSSTATUS: v = 1; break;            /* RESETDONE */
+    case R_IRQSTATUS: v = s->regs[R_IRQSTATUS]; break;
+    case R_CONTROL1:
+        /* GOLCD (bit5) / GODIGITAL (bit6) are set by software to latch the
+         * shadow registers and self-clear at the next vsync. Report them clear
+         * so the driver's "set GO, poll until clear" loop completes. */
+        v = s->regs[R_CONTROL1] & ~0x60u;
+        break;
+    default:          v = s->regs[(addr >> 2) & 0x3ff]; break;
     }
+    if (getenv("TITANIUM_DISPC_TRACE")) {
+        fprintf(stderr, "[dispc] rd %03x -> %08x\n",
+                (unsigned)(addr & 0xfff), (unsigned)v);
+    }
+    return v;
 }
 
 static void dispc_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     TitaniumDISPCState *s = opaque;
 
+    if (getenv("TITANIUM_DISPC_TRACE")) {
+        fprintf(stderr, "[dispc] wr %03x <- %08x\n",
+                (unsigned)(addr & 0xfff), (unsigned)val);
+    }
+    /* DISPC_IRQSTATUS is write-1-to-clear; everything else stores verbatim. */
+    if ((addr >> 2) == R_IRQSTATUS) {
+        s->regs[R_IRQSTATUS] &= ~(uint32_t)val;
+        dispc_update_irq(s);
+        return;
+    }
+
     s->regs[(addr >> 2) & 0x3ff] = (uint32_t)val;
+
+    if ((addr >> 2) == R_IRQENABLE) {
+        dispc_update_irq(s);
+        return;
+    }
 
     /* Any change to enable/geometry/base may change the picture */
     switch (addr >> 2) {
@@ -204,7 +261,11 @@ static void dispc_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->iomem, OBJECT(s), &dispc_ops, s,
                           "titanium-dispc", 0x1000);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
     s->con = graphic_console_init(dev, 0, &dispc_gfx_ops, s);
+    s->vsync = timer_new_ns(QEMU_CLOCK_VIRTUAL, dispc_vsync_tick, s);
+    timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              NANOSECONDS_PER_SECOND / DISPC_VSYNC_HZ);
 }
 
 static void dispc_reset_hold(Object *obj, ResetType type)

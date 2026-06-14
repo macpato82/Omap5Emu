@@ -302,7 +302,21 @@ WindowManager / TaskManager / Desktop / ScreenModes / GC320Video
 
 ### Current stopping point
 
-`GC320Video` (the Vivante GC320 2D GPU / video driver) spins during init - no
-data abort, just a SWI poll loop - waiting on the unmodelled GC320 at
-`0x59000000`. Next work: model enough of the GC320 (and/or the DSS path) for its
-init to complete, after which the DISPC framebuffer scan-out should show output.
+`GC320Video` (the closed Vivante GC320 video blob) spins during init - no data
+abort, just a SWI poll loop. Tracing showed it is the **DSS/HDMI display
+bring-up**, not the GC320 GPU itself. Progress made on it:
+
+- `HDMI_WP_SYSCONFIG` (`0x58040010`) SOFTRESET now self-clears.
+- The DSS video/HDMI **ADPLLs** (`DPLL_VIDEO1 0x58004300`, `VIDEO2 0x58009300`,
+  `HDMI 0x58040200`) now report `PLL_STATUS[1]` lock and self-clear `PLL_GO`.
+- DISPC `CONTROL1` `GO` bits (GOLCD/GODIGITAL) now self-clear.
+- DISPC now raises a periodic **VSYNC interrupt** (GIC SPI 25 = `DevNoVideo`,
+  60 Hz) with `IRQSTATUS`/`IRQENABLE` (W1C) handling.
+
+With these the blob performs a **complete DISPC mode-set** - timings, the
+256-entry gamma LUT, `GFX_BA_0 = 0x80000000`, display enable - enables
+`DISPC_IRQENABLE.VSYNC`, and its VSYNC interrupt is now delivered and serviced
+(hundreds of IRQs handled). However `GC320Video` init still does not return: the
+blob waits on a further dependency, most likely the **HDMI core/PHY readiness or
+hotplug-detect / EDID** path (EDID is read over I2C4/I2C5). Completing the visible
+desktop is the remaining work and is a multi-step HDMI bring-up effort.

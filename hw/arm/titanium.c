@@ -194,6 +194,26 @@ static uint64_t titanium_l4_read(void *opaque, hwaddr off, unsigned size)
         }
     }
 
+    /*
+     * DSS video/HDMI ADPLLs the GC320 video blob programs: DPLL_VIDEO1
+     * 0x58004300, DPLL_VIDEO2 0x58009300, DPLL_HDMI 0x58040200 (each: PLL_STATUS
+     * at +0x04, PLL_GO at +0x08). PLL_GO self-clears once the new config is
+     * applied (so the blob's poll-until-clear finishes); PLL_STATUS[1] PLL_LOCK
+     * reports lock. Config registers fall through to verbatim readback below.
+     */
+    {
+        uint32_t phys = 0x44000000 + (uint32_t)woff;
+        const uint32_t pllbase[3] = {0x58004300, 0x58009300, 0x58040200};
+        for (int i = 0; i < 3; i++) {
+            if (phys == pllbase[i] + 0x04) {
+                return 0x2;          /* PLL_STATUS: PLL_LOCK */
+            }
+            if (phys == pllbase[i] + 0x08) {
+                return 0;            /* PLL_GO: self-cleared */
+            }
+        }
+    }
+
     /* Other written registers: return verbatim. */
     if (g_hash_table_contains(s->regs, key)) {
         return GPOINTER_TO_UINT(g_hash_table_lookup(s->regs, key));
@@ -286,6 +306,14 @@ static void titanium_l4_write(void *opaque, hwaddr off, uint64_t val,
         if (phys >= 0x48880000 && phys < 0x48960000 &&
             (woff & 0xfff) == 0x10) {
             val &= ~(uint64_t)0x20000;
+        }
+        /*
+         * HDMI_WP (DSS HDMI wrapper) SYSCONFIG at 0x58040010: SOFTRESET (bit0)
+         * self-clears. The GC320 video blob writes it and polls until clear.
+         */
+        if (phys >= 0x58040000 && phys < 0x58041000 &&
+            (woff & 0xfff) == 0x10) {
+            val &= ~(uint64_t)0x3;
         }
     }
 
@@ -926,7 +954,7 @@ static void titanium_init(MachineState *machine)
      * console and scans out the GFX framebuffer RISC OS programs in DRAM, so
      * the screen becomes visible once the kernel sets a mode.
      */
-    sysbus_create_simple("titanium-dispc", 0x58001000, NULL);
+    sysbus_create_simple("titanium-dispc", 0x58001000, pic[25]); /* DevNoVideo */
 
     /* Boot via the emulated AM5728 mask-ROM GP path */
     titanium_load_rom(machine);
