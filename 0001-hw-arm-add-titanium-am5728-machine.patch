@@ -1143,10 +1143,10 @@ index 90e6c04..85ca229 100644
  system_ss.add(when: 'CONFIG_SSD0323', if_true: files('ssd0323.c'))
 diff --git a/hw/display/titanium_dispc.c b/hw/display/titanium_dispc.c
 new file mode 100644
-index 0000000..d08f9d1
+index 0000000..145111b
 --- /dev/null
 +++ b/hw/display/titanium_dispc.c
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,369 @@
 +/*
 + * TI AM5728 DSS / DISPC display controller — minimal framebuffer scan-out
 + * for the Elesar Titanium machine (RISC OS 5).
@@ -1175,6 +1175,7 @@ index 0000000..d08f9d1
 +#include "hw/display/framebuffer.h"
 +#include "ui/pixel_ops.h"
 +#include "system/address-spaces.h"
++#include "exec/cpu-common.h"
 +#include "qom/object.h"
 +
 +#define TYPE_TITANIUM_DISPC "titanium-dispc"
@@ -1222,12 +1223,78 @@ index 0000000..d08f9d1
 +    qemu_set_irq(s->irq, (s->regs[R_IRQSTATUS] & s->regs[R_IRQENABLE]) != 0);
 +}
 +
++/* Debug aid: dump the GFX framebuffer to a PPM (TITANIUM_FB_DUMP=path), so the
++ * desktop can be inspected on a headless host. Throttled to ~1 Hz. */
++static void dispc_dump_ppm(TitaniumDISPCState *s)
++{
++    const char *path = getenv("TITANIUM_FB_DUMP");
++    uint32_t ba, gsz, w, h, fmt, x, y;
++    int bpp;
++    uint8_t *fb;
++    FILE *f;
++
++    if (!path) {
++        return;
++    }
++    ba = s->regs[R_GFX_BA_0];
++    gsz = s->regs[R_GFX_SIZE];
++    w = (gsz & 0x7ff) + 1;
++    h = ((gsz >> 16) & 0x7ff) + 1;
++    if (w <= 1 || h <= 1) {                 /* GFX_SIZE unset: use LCD panel size */
++        uint32_t lcd = s->regs[0x07c / 4];
++        w = (lcd & 0x7ff) + 1;
++        h = ((lcd >> 16) & 0x7ff) + 1;
++    }
++    if (ba == 0 || w <= 1 || h <= 1 || w > 4096 || h > 4096) {
++        return;
++    }
++    fmt = (s->regs[R_GFX_ATTRIBUTES] >> GFX_ATTR_FORMAT_SHIFT) & GFX_ATTR_FORMAT_MASK;
++    /* OMAP DISPC GFX formats: 0x3=CLUT8, 0x6=RGB16, 0x8=RGB24, 0x9/0xC/0xD=32bpp */
++    bpp = (fmt == 0x3) ? 1 : (fmt == 0x6) ? 2 : 4;
++    if (getenv("TITANIUM_FB_BPP")) {
++        bpp = atoi(getenv("TITANIUM_FB_BPP"));
++    }
++
++    fb = g_malloc((size_t)w * h * bpp);
++    cpu_physical_memory_read(ba, fb, (size_t)w * h * bpp);
++    f = fopen(path, "wb");
++    if (f) {
++        fprintf(f, "P6\n%u %u\n255\n", w, h);
++        for (y = 0; y < h; y++) {
++            for (x = 0; x < w; x++) {
++                uint8_t *p = fb + ((size_t)y * w + x) * bpp;
++                uint8_t r, gc, b;
++                if (bpp == 1) {
++                    r = gc = b = *p;        /* CLUT8: grayscale by index */
++                } else if (bpp == 2) {
++                    uint16_t v = lduw_le_p(p);
++                    r = ((v >> 11) & 0x1f) << 3;
++                    gc = ((v >> 5) & 0x3f) << 2;
++                    b = (v & 0x1f) << 3;
++                } else {
++                    uint32_t v = ldl_le_p(p);
++                    r = v & 0xff; gc = (v >> 8) & 0xff; b = (v >> 16) & 0xff;
++                }
++                fputc(r, f); fputc(gc, f); fputc(b, f);
++            }
++        }
++        fclose(f);
++        fprintf(stderr, "[dispc] dumped %ux%u fmt=0x%x %dbpp fb @%08x -> %s\n",
++                w, h, fmt, bpp * 8, ba, path);
++    }
++    g_free(fb);
++}
++
 +static void dispc_vsync_tick(void *opaque)
 +{
 +    TitaniumDISPCState *s = opaque;
++    static int n;
 +
 +    s->regs[R_IRQSTATUS] |= DISPC_IRQ_VSYNC;
 +    dispc_update_irq(s);
++    if (++n % 60 == 0) {
++        dispc_dump_ppm(s);
++    }
 +    timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
 +              NANOSECONDS_PER_SECOND / DISPC_VSYNC_HZ);
 +}
