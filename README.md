@@ -1,4 +1,4 @@
-# Elesar Titanium (TI AM5728) — RISC OS 5 Emulator
+# RISC OS Titulator — Based on the A15 Titanium
 
 An **experimental** QEMU machine type, `titanium`, that models enough of the
 TI **AM5728** (Cortex-A15, ARMv7-A) — the SoC on Elesar's **Titanium** board —
