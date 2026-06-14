@@ -4,10 +4,12 @@ An **experimental** QEMU machine type, `titanium`, that models enough of the
 TI **AM5728** (Cortex-A15, ARMv7-A) — the SoC on Elesar's **Titanium** board —
 to boot the **RISC OS 5** Titanium ROM.
 
-> Status: **early bring-up.** The real RISC OS 5.31 Titanium ROM's boot
-> first-stage executes and runs through CPU/secure setup and PRCM clock
-> configuration; it currently stops at a DPLL lock-status poll (next task).
-> See [Status](#status).
+> Status: **active bring-up — booting deep into the RISC OS kernel.** The real
+> RISC OS 5.31 Titanium ROM runs through the AM5728 GP boot, the HAL, MMU/CAM
+> setup, CMOS read, IRQ enable and into **RISC OS module initialisation**. The
+> two long-standing blockers (the kernel CAM mapping and the CMOS/I2C read)
+> are now fixed. Current stopping point: USB host-controller (xHCI) bring-up
+> during keyboard-scan module init. See [Status](#status).
 
 This is a fresh QEMU board port — *not* related to RPCEmu, which emulates the
 1990s Risc PC (ARMv3/v4) and cannot host an ARMv7-A SoC.
@@ -22,20 +24,25 @@ core, GIC, generic timer and device framework, so a Titanium board is a
 ## Contents
 
 - `hw/arm/titanium.c` — the machine model (also provided as a patch).
+- `hw/display/titanium_dispc.c` — minimal DSS/DISPC framebuffer scan-out device.
 - `0001-hw-arm-add-titanium-am5728-machine.patch` — apply to **QEMU v10.2.1**
-  (adds `titanium.c`, wires `hw/arm/meson.build` and `hw/arm/Kconfig`).
-- `docs/boot-notes.md` — analysis of the AM5728 GP boot as the ROM performs it.
+  (adds the machine + DISPC, wires `meson.build`/`Kconfig`).
+- `docs/boot-notes.md` — detailed analysis of the AM5728 boot as the ROM
+  performs it, and the debug-ROM diagnosis of each blocker.
 
-## AM5728 memory map modelled (from the TRM)
+## AM5728 memory map / devices modelled (from the TRM)
 
 | Region | Base | Notes |
 |---|---|---|
-| DDR (EMIF1 CS0) | `0x80000000` | 1 GiB |
-| OCMC_RAM1 | `0x40300000` | on-chip SRAM; GP first-stage runs here |
+| DDR (EMIF1) | `0x80000000` | 2 GiB (HW size; first-stage needs the 2nd GB) |
+| OCMC_RAM1 | `0x40300000` | 512 KiB on-chip SRAM; GP first-stage runs here |
+| OCMC_RAM2/RAM3 | `0x40400000` | 2 MiB on-chip SRAM — **HAL reports these as RAM banks**; backing them fixed the CAM blocker |
 | GIC (MPU_INTC) | `0x48210000` | GICD `+0x1000`, GICC `+0x2000` |
-| UART1 (HAL debug) | `0x4806A000` | 16550-compatible |
+| UART1 (HAL debug) | `0x4806A000` | 16550 core + OMAP extension regs |
+| I2C1 / I2C4 / I2C5 | `0x48070000` / `0x4807A000` / `0x4807C000` | OMAP I2C master (interrupt-driven); I2C1 carries CMOS/RTC/PMIC |
+| DSS / DISPC | `0x58001000` | framebuffer scan-out (renders once RISC OS sets a mode) |
 | QSPI flash window | `0x5C000000` | full ROM image mapped here |
-| L4 peripheral stub | `0x44000000` | **placeholder RAM** (to be replaced by PRCM/CTRL/EMIF devices) |
+| L4 peripheral stub | `0x44000000` | backed window + synthesised PRCM/clock/reset status |
 
 ## Build
 
@@ -59,66 +66,65 @@ included here. The machine emulates the AM5728 mask-ROM GP boot: it reads the
 ROM's TI GP header, loads the first-stage into OCMC RAM, and starts the CPU.
 
 ```sh
-./build/qemu-system-arm -M titanium -bios TITANIUM.ROM -nographic
+./build/qemu-system-arm -M titanium -bios TITANIUM.ROM -serial stdio -display none
 ```
+
+The production ROM is built `Debug=FALSE` and emits **no** serial output. To see
+the boot narrate over the UART you need a `Debug=TRUE` ROM (HAL `Debug` +
+kernel `DebugROMInit`/`DebugHALTX`), built from the RISC OS Open source — this
+is how the blockers below were diagnosed.
 
 ## Status
 
-Working:
-- `titanium` machine (single Cortex-A15, as RISC OS uses) constructs the AM5728
-  core: GIC, 2 GB DDR, OCMC, UART, QSPI window, and an L4 PRCM/clock stub.
-- Emulated GP mask-ROM boot loads and enters the ROM's first-stage.
-- First-stage runs all the way through: Secure SVC setup → `SCTLR`/`ACTLR`
-  config → early secure `SMC` (via QEMU PSCI) → DPLL lock + module-clock polls
-  (satisfied by the PRCM stub) → **EMIF/DDR init** → **loads the HAL from the
-  QSPI window into DRAM and jumps to it**.
-- The HAL is staged in DDR (≈`0xC0000000`), **enables the MMU**, and runs at
-  its linked address **`0xFC000000`** — i.e. into HAL device initialisation.
-- Currently stops at an OMAP peripheral **soft-reset wait** (write `SOFTRESET`,
-  poll the bit to self-clear) during device init.
+**Boots through the AM5728 GP boot → HAL → MMU/CAM → CMOS → IRQs on → RISC OS
+module initialisation.** With a `Debug=TRUE` ROM the serial log reads:
 
-The L4 PRCM/clock stub now models the specific behaviours the HAL device-init
-needs, all derived by tracing the real ROM:
-- DPLL lock (`CM_IDLEST_DPLL`), clock-domain transition status (CM_CORE_AON),
-- OMAP peripheral `SOFTRESET` self-clear (L4_PER SYSCONFIG/TIOCP_CFG at +0x10),
-- peripheral `REVISION` reads (L4_PER/L4_WKUP, +0x00) returning nonzero,
-- I2C `SYSS` `RDONE` (reset done), and a backed peripheral window up to QSPI
-  so PCIe/other probes don't abort.
+```
+InitARM done · RAM registered · Entered HAL_Init · HAL initialised
+... CAM mapped & filled ...
+InitCMOSCache done · InitDynamicAreas · InitVectors · VduInit
+Machine ID duff,zero substituted · KeyInit · OscliInit · IRQs on
+HAL_InitDevices · Registering devices · AMBControl_Init · ModuleInitForKbdScan
+```
 
-With these the HAL runs ~960 basic blocks: clocks → DDR → HAL load → MMU on →
-HAL at 0xFC000000 → device init (resets timers, probes GPIO/I2C/PCIe).
+### Blockers fixed
 
-**OMAP UART implemented:** the 16550 core (`serial_mm`, which emits chars) plus
-an OMAP extension model at +0x20 — MDR1 mode select, SSR (TX ready), MVR, and
-SYSC/SYSS soft-reset/RESETDONE — so the HAL's OMAP-specific UART init completes
-and HAL_Debug output will emit once reached.
+- **GP boot / secure setup** — keep EL3 (the GP boot runs Secure); route `SMC`
+  through QEMU PSCI; back the L4 peripheral window.
+- **PRCM / clocks** — a real Clock Manager model (DPLL/APLL lock via read-only
+  IDLEST, `CLKCTRL` IDLEST from `MODULEMODE`, SerDes/PHY ready) so clock
+  bring-up advances correctly instead of on blind fakes.
+- **OMAP UART** — 16550 core + OMAP extension regs (MDR1/SSR/MVR/SYSC/SYSS) so
+  HAL/kernel serial output works.
+- **The CAM / `0xF9BFFFF0` blocker** — the kernel built the 8 MiB CAM (page map)
+  but faulted forever writing it. A debug ROM dumped the HAL `PhysRamTable` and
+  revealed an **unbacked OCMC_RAM2/RAM3 bank at `0x40400000`** the kernel was
+  allocating page tables from. Backing it fixed the fault.
+- **CMOS / I2C** — `InitCMOSCache` reads the CMOS EEPROM over I2C, and the HAL
+  drives the transfer from the **I2C interrupt** (it waits, doesn't poll). Added
+  a minimal interrupt-driven **OMAP I2C controller** model (status-bit
+  sequencing + GIC line) so the read completes and the kernel runs on.
 
-The HAL now runs ~1000 blocks through device init: clocks, DDR, MMU, timer
-resets, GPIO/I2C/PCIe probes, and USB1/USB2 subsystem reset. It has not yet hit
-a HAL_Debug UART write — the first banner is evidently further into device init
-(or in the kernel handover).
+### Current stopping point
 
-Next — the honest picture:
-- Reaching the banner is a long tail of per-peripheral init (next blocker is a
-  PRCM poll at 0x4A084C04, then likely DSS/MMC/CPSW/more USB). Hand-stubbing
-  each register works but doesn't clearly converge.
-- Better strategy from here: (a) study HAL_Titanium to find exactly where/if it
-  first writes the UART and what it gates on; and/or (b) build real device
-  models for the critical-path peripherals (PRCM/CTRL, USB) rather than ad-hoc
-  register stubs.
+A SWI loop during `ModuleInitForKbdScan`, which starts the HAL's keyboard-scan
+dependency modules (`USBDriver`, `XHCIDriver`, …). The keyboard is USB, so the
+next work is the **xHCI USB host controller** — being diagnosed with the kernel
+`DebugTerminal` option to name the exact hanging module. See `docs/boot-notes.md`.
 
-### Boot progress reached (this milestone)
+### Methodology
 
-`reset → OCMC first-stage → clocks/DPLLs → DDR init → HAL loaded from QSPI →
-HAL in DDR → MMU on → HAL at 0xFC000000 (device init)` — ~700 basic blocks,
-no aborts. See `docs/boot-notes.md`.
+Each blocker was cracked with a **`Debug=TRUE` ROM** (built from the RISC OS Open
+sources under RPCEmu + DDE) whose kernel `DebugReg` probes dump live state
+(`PhysRamTable`, CAM addresses, I2C registers) over the emulated serial port —
+turning blind trace-debugging into precise, source-level diagnosis.
 
 ## Credits / licences
 
-- QEMU: GPL-2.0-or-later. `titanium.c` is licensed the same.
+- QEMU: GPL-2.0-or-later. `titanium.c` / `titanium_dispc.c` are licensed the same.
 - RISC OS 5 (the ROM you supply) is from [RISC OS Open](https://www.riscosopen.org/)
-  under the Apache-2.0 shared-source licence; the HAL source used as the boot
-  reference is [HAL_Titanium](https://gitlab.riscosopen.org/jlee/HAL_Titanium).
+  under the Apache-2.0 shared-source licence; the HAL/kernel sources used as the
+  boot reference are from [RISC OS Open](https://gitlab.riscosopen.org/).
 - AM5728 register/address details from TI's AM5728 TRM.
 
 Developed by RISCOS Technologies
