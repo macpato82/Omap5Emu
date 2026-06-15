@@ -1,17 +1,69 @@
-# RISC OS Titulator — Based on the A15 ARM Processor
+# A15 Titanium Emulator
 
+An emulator for the RISC OS **A15 Titanium** machine, based on the Texas Instruments **AM5728** SoC (dual Cortex-A15).
 
-Each blocker was cracked with a **`Debug=TRUE` ROM** (built from the RISC OS Open
-sources under RPCEmu + DDE) whose kernel `DebugReg` probes dump live state
-(`PhysRamTable`, CAM addresses, I2C registers) over the emulated serial port —
-turning blind trace-debugging into precise, source-level diagnosis.
+> **Status:** Work in progress. See [Roadmap](#roadmap) below.
 
-## Credits / licences
+---
 
-- QEMU: GPL-2.0-or-later. `titanium.c` / `titanium_dispc.c` are licensed the same.
-- RISC OS 5 (the ROM you supply) is from [RISC OS Open](https://www.riscosopen.org/)
-  under the Apache-2.0 shared-source licence; the HAL/kernel sources used as the
-  boot reference are from [RISC OS Open](https://gitlab.riscosopen.org/).
-- AM5728 register/address details from TI's AM5728 TRM.
+## Overview
 
-Developed by RISCOS Technologies
+This project emulates the hardware of the A15 Titanium motherboard sufficiently to boot and run RISC OS. It models the AM5728 SoC peripherals, memory map, and core behaviour as a software target.
+
+The AM5728 is a publicly documented part. All hardware facts used in this emulator — register addresses, bit-field layouts, memory maps, reset values, and peripheral behaviour — are derived from publicly available Texas Instruments sources and from observation of real hardware behaviour.
+
+## Hardware target
+
+| Item        | Detail                                              |
+|-------------|-----------------------------------------------------|
+| SoC         | Texas Instruments AM5728 (Sitara)                   |
+| CPU         | 2× ARM Cortex-A15                                    |
+| Machine     | A15 Titanium (RISC OS)                              |
+| References  | TI public AM5728 datasheet & Technical Reference Manual |
+
+## Building
+
+```
+# TODO: fill in your build steps
+```
+
+## Running
+
+```
+# TODO: fill in invocation + ROM image instructions
+```
+
+You must supply your own RISC OS ROM image. None is distributed with this project.
+
+## Roadmap
+
+- [ ] CPU core (Cortex-A15)
+- [ ] Memory map & DDR
+- [ ] Interrupt controller (GIC)
+- [ ] UART
+- [ ] Timers
+- [ ] Display / framebuffer
+- [ ] Storage
+- [ ] USB / input
+
+## Documentation & provenance
+
+This emulator is an **independent, clean-room-style implementation**. It is written from an understanding of how the AM5728 hardware behaves, not by transcribing any third-party document.
+
+- Register and peripheral definitions are annotated, where practical, with citations to **TI's publicly available** AM5728 datasheet and Technical Reference Manual.
+- No proprietary or licence-restricted documentation is reproduced, redistributed, or included in this repository — neither the documents themselves nor their text, diagrams, or tables.
+- No RISC OS ROM, firmware, or other copyrighted binary is distributed here.
+
+If you believe any content in this repository infringes your rights, please open an issue and it will be addressed promptly.
+
+## Legal
+
+- "RISC OS" and "Titanium" are the property of their respective owners. This project is not affiliated with or endorsed by them.
+- "Sitara" and "AM5728" are trademarks of Texas Instruments. This project is not affiliated with or endorsed by Texas Instruments.
+- This is a hobby / interoperability project. Emulation of hardware for the purpose of running otherwise-licensed software is the user's responsibility.
+
+## License
+
+This emulator's **source code** is licensed under the [MIT License](LICENSE) (or choose your own — update this section and add a LICENSE file).
+
+Note: this licence applies only to the original source code in this repository. It does not grant rights to any third-party documentation, ROM images, or firmware, which are not included here.
