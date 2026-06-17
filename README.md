@@ -4,7 +4,7 @@ An emulator for the RISC OS **Dual Core A15 OMAP5** machine, based on the Texas 
 
 > **Status:** Work in progress. See [Roadmap](#roadmap) below.
 
-![RISC OS running on the Dual Core A15 OMAP5 emulator — colour desktop, hardware pointer, Task Manager and iconbar](docs/screenshot-desktop-colour.png)
+![RISC OS running on the Dual Core A15 OMAP5 emulator — colour desktop, hardware pointer, Task Manager and iconbar](docs/screenshot-desktop-colour.jpg)
 
 *RISC OS booted to the colour desktop on the emulated AM5728, with the Task
 Manager and iconbar.*
