@@ -42,14 +42,36 @@ You must supply your own RISC OS ROM image. None is distributed with this projec
 
 ## Roadmap
 
-- [X ] CPU core (Cortex-A15)
-- [ X] Memory map & DDR
-- [X ] Interrupt controller (GIC)
-- [ ] UART
-- [ ] Timers
-- [X ] Display / framebuffer
-- [X ] Storage
-- [ X] USB / input
+RISC OS boots all the way to the colour desktop and is interactive. Status of
+the emulated subsystems:
+
+**Working**
+
+- [x] CPU cores — 2× Cortex-A15
+- [x] Memory map & DDR
+- [x] Interrupt controller (GIC)
+- [x] Clocks / PRCM (DPLL/APLL lock)
+- [x] UART (OMAP 16550)
+- [x] Timers (DMTIMER) & OS tick
+- [x] CMOS / RTC over I2C
+- [x] Display / framebuffer — colour desktop, hardware mouse pointer, idle dirty-skip
+- [x] Storage — SATA (AHCI) and SD/MMC
+- [x] USB / input — xHCI keyboard **and** mouse
+- [x] Networking — CPSW Ethernet over SLIRP user-mode NAT
+- [x] HostFS — host ↔ RISC OS file bridge
+- [x] GC320 — 2D graphics acceleration
+- [x] Boots to the RISC OS desktop
+
+**In progress / experimental**
+
+- [~] Audio — McASP3 + TLV320 codec (opt-in via `TITANIUM_SOUND=1`)
+- [~] Second core (SMP/AMP) — secondary A15 released via PSCI `CPU_ON`; RISC OS
+  SMP HAL entries and ROM build in progress
+
+**Planned**
+
+- [ ] `AUX_CORE_BOOT` secondary-core release for SMP on real AM5728 silicon
+- [ ] Promote audio to on-by-default once the model is fully stable
 
 ## Documentation & provenance
 
