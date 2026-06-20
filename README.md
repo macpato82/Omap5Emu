@@ -1,4 +1,4 @@
-# A15 OMAP Emulator Based on Ti AM5728 and Ti HAL RISCOS 5
+# RISC OS 5 TiBox
 
 An emulator for the RISC OS **Dual Core A15 OMAP5** machine, based on the Texas Instruments **AM5728** SoC (dual Cortex-A15).
 
